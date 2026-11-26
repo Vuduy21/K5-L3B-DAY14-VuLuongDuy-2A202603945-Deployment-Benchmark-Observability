@@ -309,7 +309,7 @@ Code: [06-lab-complete/](06-lab-complete/) — URL public: https://ai-agent-o0tr
 - Khi Redis lỗi, `/ask` trả 503 thay vì bỏ qua giới hạn.
 
 ### Output `check_production_ready.py`
-Lần chạy đầy đủ trên Windows (có Docker): **11/12 tiêu chí ✅, 42/42 checks đạt**. Tiêu chí 11 (Graceful shutdown) ở trạng thái ⚠️ vì script không gửi được SIGTERM trên Windows. Phần `docker stop` của tiêu chí này đạt (exit code 0, 0.9s).
+**Kết quả chính: `PASS 12/12` (43/43 checks), chạy đầy đủ trên Linux** (không `--skip-docker`, không `--static-only`). Trên Windows script không gửi được SIGTERM nên tiêu chí 11 luôn ở trạng thái ⚠️; vì vậy tôi chạy chính script chấm (không sửa) trong một container Linux (`docker:27-cli` + Python 3) dùng Docker của máy để build image và chạy container, với cả thư mục `06-lab-complete/` và `.gitignore` của repo.
 
 ```
 📋 Checklist Deliverable
@@ -323,14 +323,21 @@ Lần chạy đầy đủ trên Windows (có Docker): **11/12 tiêu chí ✅, 42
    ✅ Cost guard
    ✅ Config từ environment variables
    ✅ Structured logging
-   ⚠️  Graceful shutdown
+   ✅ Graceful shutdown
    ✅ Public URL ready (Railway / Render config)
-Result: 11/12 tiêu chí đạt · 42/42 checks passed
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
 ```
 
-Check SIGTERM ở runtime đã chạy riêng trong container Linux (`python:3.11-slim`, cùng script chấm, `--skip-docker`) và đạt: _"SIGTERM lúc đang có request → request vẫn 200, process tự thoát — exit code 0"_.
-
-> TODO — chạy lại bản đầy đủ trên Linux/WSL2 có Docker để dán output `PASS 12/12` thay cho đoạn trên.
+Lệnh đã dùng (từ gốc repo, Git Bash trên Windows với Docker Desktop):
+```
+docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd -W):/repo:ro" -e PYTHONUTF8=1 docker:27-cli sh -c   "apk add -q --no-cache python3 py3-pip && mkdir /work && cp -r /repo/.gitignore /work/ && cp -r /repo/06-lab-complete /work/06-lab-complete && cd /work/06-lab-complete    && pip install -q --break-system-packages fastapi uvicorn redis pydantic pyjwt psutil python-dotenv && python3 check_production_ready.py"
+```
+Các kết quả khác để đối chiếu:
+- Chạy trực tiếp trên Windows (có Docker): 11/12 tiêu chí, 42/42 checks đạt; chỉ tiêu chí 11 là ⚠️ vì không gửi được SIGTERM trên Windows (`docker stop` vẫn đạt: exit code 0, 0,9 s).
+- Lần đầu chạy trong container Linux tôi chỉ mount riêng `06-lab-complete/` nên script không thấy `.gitignore` ở thư mục cha và báo `.env nằm trong .gitignore` ❌; đó là lỗi cách dựng môi trường thử, không phải lỗi code, và đã hết khi mount đúng.
+- URL public: `GET https://ai-agent-o0tr.onrender.com/health` trả 200 (xem [DEPLOYMENT.md](DEPLOYMENT.md)).
 
 ## AI Usage Log
 
