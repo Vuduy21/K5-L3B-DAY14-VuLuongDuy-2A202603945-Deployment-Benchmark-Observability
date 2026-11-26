@@ -27,6 +27,8 @@ USER agent
 
 ENV PATH=/home/agent/.local/bin:$PATH
 ENV PYTHONPATH=/app
+# User "agent" có HOME=/app nên Python mặc định tìm package ở /app/.local; chỉ về nơi đã COPY
+ENV PYTHONUSERBASE=/home/agent/.local
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
