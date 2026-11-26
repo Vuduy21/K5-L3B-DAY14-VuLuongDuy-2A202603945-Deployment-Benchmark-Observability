@@ -61,21 +61,89 @@ Bản production ([production/app.py](01-localhost-vs-production/production/app.
 
 ## Part 2: Docker
 
-> TODO — số MB phải đo bằng `docker images`, không chép từ README.
-
 ### Exercise 2.1: Dockerfile questions
-1. Base image: _TODO_
-2. Working directory: _TODO_
-3. Vì sao `COPY requirements.txt` đứng trước `COPY . .`: _TODO_
-4. `CMD` vs `ENTRYPOINT`: _TODO_
+Dựa trên [02-docker/develop/Dockerfile](02-docker/develop/Dockerfile):
+1. **Base image:** `python:3.11` (dòng 8), bản Python đầy đủ trên Debian. Nặng vì chứa nhiều công cụ build (trong `docker history` có một layer `apt-get` riêng 696 MB).
+2. **Working directory:** `/app` (dòng 11). Các lệnh `COPY`/`RUN`/`CMD` phía sau tính từ đây.
+3. **Vì sao `COPY requirements.txt` trước:** tận dụng layer cache. Code đổi thường xuyên, `requirements.txt` hiếm khi đổi. Đặt `COPY requirements.txt` + `pip install` trước `COPY app.py` thì khi chỉ sửa code, bước cài thư viện được dùng lại từ cache (xem bảng đo ở Exercise 2.2).
+4. **`CMD` vs `ENTRYPOINT`:** `CMD` là lệnh mặc định, bị thay thế khi truyền lệnh vào `docker run`. `ENTRYPOINT` là chương trình cố định của container, tham số của `docker run` được nối vào sau. Dockerfile này dùng `CMD ["python", "app.py"]` (dạng exec) nên `python` là PID 1 và nhận SIGTERM trực tiếp.
 
-### Exercise 2.3: Image size comparison
-- Develop: _TODO_ MB
-- Production: _TODO_ MB
-- Difference: _TODO_ %
+### Exercise 2.2: Build và run (bản develop)
+```
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run -d -p 8000:8000 --name agent-dev my-agent:develop
+curl http://localhost:8000/health   → {"status":"ok","uptime_seconds":207.9,"container":true}
+curl -X POST "http://localhost:8000/ask?question=What%20is%20Docker"
+  → {"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+```
+- Vào trong container (`docker exec -it agent-dev sh`): `pwd` = `/app`, thư mục có `app.py`, `requirements.txt`, `utils/mock_llm.py`; `whoami` = **`root`** (điểm yếu bảo mật của bản develop).
+- `docker history my-agent:develop`: phần lớn dung lượng nằm ở base image Python; `pip install` chỉ 53,3 MB, `COPY app.py` / `COPY utils` chỉ ~12–16 KB mỗi layer.
+- Lưu ý: gọi `curl` ngay lúc `docker run` vừa xong trả `Empty reply from server`, vì uvicorn chưa khởi động xong. Container "Up" chưa có nghĩa là app sẵn sàng, nên cần HEALTHCHECK/readiness.
+
+**Thí nghiệm layer cache** (build lại 3 lần, bản develop):
+
+| Lần | Thay đổi | Thời gian | Bước dùng cache | Bước chạy lại |
+|---|---|---|---|---|
+| 1 | Không đổi | 2,0 s | `[2/7]`–`[7/7]` đều `CACHED` | Không có |
+| 2 | Sửa `app.py` | 2,8 s | `[2/7]`, `[3/7]` COPY requirements, `[4/7]` pip install | Từ `[5/7]` COPY app.py |
+| 3 | Sửa `requirements.txt` | 17,8 s | Chỉ `[2/7]` | Từ `[3/7]`, gồm cả `pip install` (11,7 s) |
+
+Kết luận: một layer đổi thì mọi layer sau nó phải build lại. Đặt phần ít đổi (dependencies) lên trước giúp sửa code chỉ mất vài giây.
+
+### Exercise 2.3: Multi-stage build
+Dựa trên [02-docker/production/Dockerfile](02-docker/production/Dockerfile):
+- **Stage 1 (`builder`):** từ `python:3.11-slim`, cài `gcc`, `libpq-dev` (công cụ build) rồi `pip install --user` các thư viện. Chỉ để build, không được deploy. Trong log build, `apt-get` mất 26,0 s và `pip install` 13,7 s.
+- **Stage 2 (`runtime`):** bắt đầu lại từ `python:3.11-slim` sạch, tạo user không phải root `appuser`, chỉ `COPY --from=builder /root/.local` (thư viện đã cài) cùng `main.py` và `mock_llm.py`; có `HEALTHCHECK`, chạy `uvicorn --workers 2` bằng `appuser`.
+- **Vì sao nhỏ hơn:** (1) base `-slim` thay vì `python:3.11` đầy đủ; (2) `gcc`, `libpq-dev`, cache `apt` ở lại stage builder và bị bỏ đi, stage runtime chỉ lấy kết quả cài đặt.
+
+Kiểm tra bản advanced: `/health` trả 200 (`version: 2.0.0`), `docker exec agent-adv whoami` = **`appuser`** (không còn root), `docker inspect` health = **`healthy`**.
+
+### Image size comparison
+Đo bằng `docker images my-agent` (Docker dùng đơn vị thập phân):
+- Develop (`python:3.11`, single-stage): **1.67 GB** (≈ 1670 MB)
+- Production (`python:3.11-slim`, multi-stage): **240 MB**
+- Difference: giảm **≈ 86%** (nhỏ hơn khoảng 7 lần), thấp hơn nhiều so với ngưỡng 500 MB.
 
 ### Exercise 2.4: Docker Compose stack
-_TODO — sơ đồ các service và kết quả test qua Nginx._
+Dựa trên [02-docker/production/docker-compose.yml](02-docker/production/docker-compose.yml) (`docker compose -f ... up --build`):
+
+```
+        Client (curl / trình duyệt)
+                   │  :80 (và :443)
+                   ▼
+            ┌─────────────┐
+            │   nginx     │  reverse proxy + load balancer
+            │  (alpine)   │  rate limit 10 req/s, security headers
+            └──────┬──────┘
+   ═══════ network "internal" (bridge, không map cổng ra ngoài) ═══════
+                   │  http://agent:8000  (upstream agent_backend)
+                   ▼
+            ┌─────────────┐
+            │   agent     │  FastAPI + uvicorn (2 workers), user appuser
+            └───┬─────┬───┘
+   REDIS_URL    │     │   QDRANT_URL
+ redis://redis  ▼     ▼   http://qdrant:6333
+         ┌────────┐ ┌─────────┐
+         │ redis  │ │ qdrant  │   volumes: redis_data, qdrant_data
+         └────────┘ └─────────┘
+```
+
+- **4 service được start:** `nginx`, `agent`, `redis`, `qdrant`.
+- **Giao tiếp:** các service nối với nhau trong network `internal` và gọi nhau **bằng tên service** (Docker DNS), ví dụ `agent:8000`, `redis:6379`, `qdrant:6333`. Chỉ `nginx` được map cổng ra máy (`80`, `443`); `agent`, `redis`, `qdrant` chỉ có cổng nội bộ.
+- **Thứ tự khởi động:** `agent` có `depends_on` với `condition: service_healthy` cho `redis` và `qdrant`, nên chờ hai service này `healthy` rồi mới chạy; `nginx` chạy sau `agent`. Log cho thấy đúng thứ tự: redis/qdrant → agent → nginx.
+- Cần tạo file rỗng `02-docker/production/.env.local` (compose có `env_file`, file nằm trong `.gitignore`).
+
+Kết quả test (`docker compose ps`: `agent`, `redis`, `qdrant` đều `healthy`):
+```
+curl http://localhost/health      → {"status":"ok","uptime_seconds":3.4,"version":"2.0.0",...}   (qua Nginx)
+curl -X POST http://localhost/ask → {"answer":"Agent đang hoạt động tốt! (mock response) ..."}   (200, qua Nginx)
+curl http://localhost:8000/health → Failed to connect (agent không map cổng ra ngoài, đúng thiết kế)
+docker compose exec nginx wget -qO- http://agent:8000/health → {"status":"ok",...}   (nginx gọi agent bằng tên service)
+docker compose exec redis redis-cli ping → PONG
+```
+Lưu ý khi test: dùng PowerShell 5.1, chuỗi JSON có dấu cách bị tách nên `/ask` lỗi 500 (`JSONDecodeError`); truyền body qua pipe (`'{"question":"..."}' | curl.exe ... -d "@-"`) thì chạy đúng.
+
+**Debug container:** `docker logs <tên>`, `docker exec -it <tên> sh`, `docker compose ps`, `docker inspect --format "{{.State.Health.Status}}" <tên>`.
 
 ## Part 3: Cloud Deployment
 
