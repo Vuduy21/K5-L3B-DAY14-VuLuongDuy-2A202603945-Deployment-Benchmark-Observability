@@ -335,5 +335,19 @@ Check SIGTERM ở runtime đã chạy riêng trong container Linux (`python:3.11
 ## AI Usage Log
 
 - Công cụ: Claude Code (Claude Sonnet 5.5).
-- Dùng cho: phân tích đề, viết code Part 6 (`app/*`, `Dockerfile`, `docker-compose.yml`, `render.yaml`...), sửa lỗi deploy Render, soạn `DEPLOYMENT.md` và phần Part 3/6 của file này.
-- Tự kiểm chứng: chạy `check_production_ready.py`, tự gọi các lệnh `curl` trên URL public và chụp ảnh kết quả.
+AI được dùng xuyên suốt bài. Dưới đây là việc AI làm và việc tôi tự làm theo từng phần.
+
+| Phần | AI làm | Tôi tự làm / kiểm chứng |
+|---|---|---|
+| Phân tích đề | Đọc `RUBRIC.md`, `CHECKPOINTS.md`, `DAY14_DELIVERY_CHECKLIST.md`, lập danh sách việc và thứ tự ưu tiên | Chọn thứ tự làm |
+| Part 1, 2, 4, 5 | Giải thích code, hướng dẫn từng bước và đưa đáp án gợi ý; soạn phần trả lời trong file này | Tự chạy các lệnh trong terminal của mình (`python app.py`, `docker build/run/compose`, `curl`), tự đo kích thước image và dán output thật; AI chỉ đối chiếu trạng thái Docker/cổng khi tôi nhờ |
+| Part 6 | Viết code `app/*` (auth, rate limit Redis, cost guard Redis, `/health`, `/ready`, JSON log, shutdown), `Dockerfile` multi-stage, `docker-compose.yml`, `.dockerignore`, `.env.example`, `railway.toml`, `render.yaml`; sửa lỗi đường dẫn Dockerfile khi deploy Render | Bật Docker Desktop, đăng nhập Docker Hub, chạy `check_production_ready.py`, deploy trên Render, tự lấy API key và gọi `curl` trên URL public |
+| Part 3 | So sánh `railway.toml` với `render.yaml`, đọc `cloudbuild.yaml`/`service.yaml` để viết phần Cloud Run | Tạo Blueprint trên Render, chụp ảnh dashboard |
+| Part 7 Bước 1 | Chạy load test, eval, sửa `KNOWLEDGE_BASE`, thêm metric `agent_question_length_chars`, viết phần 1–3 của `BENCHMARK_REPORT.md` | Xem và kiểm tra kết quả (các file trong `reports/`) |
+| Part 7 Bước 2 | Dựng stack Docker, viết script đo thời gian alert firing, chạy các thí nghiệm A–E và benchmark scale 1/3, lấy trace và log từ API Jaeger, sửa lỗi `Dockerfile` (`PYTHONUSERBASE`), viết phần 4–6 của báo cáo | Chụp 4 ảnh (Grafana, hai trace Jaeger, trang Alerts của Prometheus) |
+
+Cách kiểm chứng tôi đã làm:
+- Số liệu trong `BENCHMARK_REPORT.md` đối chiếu bằng script với file JSON trong `reports/` và CSV trong `benchmark-results/`; ảnh chụp lấy từ stack chạy thật.
+- Các kết quả "lạ" được kiểm tra lại thay vì giữ nguyên: lần đo concurrency 100 chạy lặp lại ba lần; thí nghiệm C làm lại vì ngưỡng cost alert bị chạm sẵn ở baseline 30 user; lỗi container `agent` khởi động lại liên tục được tìm nguyên nhân từ log.
+- Những điểm chưa kiểm chứng được đều ghi rõ trong bài (ví dụ nguyên nhân RPS giảm ở concurrency 100 chỉ là giả thuyết).
+- Với `PASS 12/12`: trên Windows script chỉ đạt 11/12 vì không gửi được SIGTERM; check này đã chạy riêng trong container Linux và đạt (xem mục Part 6).
