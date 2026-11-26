@@ -174,13 +174,71 @@ Lưu ý khi test: dùng PowerShell 5.1, chuỗi JSON có dấu cách bị tách 
 
 ## Part 4: API Security
 
-> TODO — chạy `04-api-gateway/`, dán output `curl -i` cho 401, 200, 429 (che token).
+### Exercise 4.1: API Key authentication
+Dựa trên [04-api-gateway/develop/app.py](04-api-gateway/develop/app.py) (chạy `AGENT_API_KEY=my-secret-key python app.py`):
+- **Check ở đâu:** hàm `verify_api_key` (dòng 39–54), dùng làm dependency `Depends(verify_api_key)` của `/ask`. Đọc header `X-API-Key` bằng `APIKeyHeader`, so với `API_KEY` lấy từ biến môi trường `AGENT_API_KEY`. `/` và `/health` không có dependency nên công khai.
+- **Sai key:** thiếu key → **401** `Missing API key`; sai key → **403** `Invalid API key`.
+- **Rotate key:** đổi biến môi trường `AGENT_API_KEY` rồi restart, không sửa code. Hạn chế: chỉ có một key và so sánh bằng `!=` (bản Part 6 dùng `secrets.compare_digest`).
 
-### Exercise 4.1-4.3: Test results
-_TODO_
+Output test (3 trường hợp):
+```
+(không có key)   POST /ask → HTTP/1.1 401 Unauthorized   {"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+(sai key)        POST /ask → HTTP/1.1 403 Forbidden      {"detail":"Invalid API key."}
+(đúng key)       POST /ask → HTTP/1.1 200 OK             {"question":"Hello","answer":"Agent đang hoạt động tốt! (mock response) ..."}
+```
+
+### Exercise 4.2: JWT authentication
+Dựa trên [production/auth.py](04-api-gateway/production/auth.py) và `app.py`. Lưu ý endpoint thật là `/auth/token` và user mẫu là `student`/`demo123`, `teacher`/`teach456` (đề trong `CODE_LAB.md` ghi `/token` và `admin`/`secret`, không khớp code).
+
+**Luồng JWT:** `POST /auth/token` với username/password → server `authenticate_user` rồi `create_token` ký token HS256 chứa `sub`, `role`, `iat`, `exp` (60 phút) → client gửi `Authorization: Bearer <token>` → `verify_token` kiểm tra chữ ký và hạn, lấy `username`/`role` mà không cần tra database (stateless).
+
+```
+POST /auth/token {"username":"student","password":"demo123"}
+  → 200 {"access_token":"<token đã che>","token_type":"bearer","expires_in_minutes":60,...}
+POST /ask  (Authorization: Bearer <token>)
+  → HTTP/1.1 200 OK  {"question":"Explain JWT","answer":"...","usage":{"requests_remaining":9,"budget_remaining_usd":1.9e-05}}
+POST /ask  (không có token)          → HTTP/1.1 401 Unauthorized  www-authenticate: Bearer
+                                       {"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+POST /ask  (Bearer abc.def.ghi)      → HTTP/1.1 403 Forbidden     {"detail":"Invalid token."}
+POST /auth/token (sai mật khẩu)      → HTTP/1.1 401 Unauthorized  {"detail":"Invalid credentials"}
+```
+Ghi chú: token hết hạn trả 401, token sai chữ ký trả 403. Trường `budget_remaining_usd` trong code thực ra là số tiền **đã dùng** (`usage.total_cost_usd`), tên gây hiểu nhầm.
+
+### Exercise 4.3: Rate limiting
+Dựa trên [production/rate_limiter.py](04-api-gateway/production/rate_limiter.py):
+- **Algorithm:** sliding window. Mỗi user có một `deque` lưu timestamp; mỗi lần gọi xoá timestamp cũ hơn 60 giây rồi đếm số còn lại.
+- **Limit:** user **10 req/phút**, admin **100 req/phút** (dòng 86–87).
+- **Bypass cho admin:** không bỏ qua hẳn; `app.py` dòng 141 chọn `rate_limiter_admin` (limit cao hơn) khi `role == "admin"`.
+- **Hạn chế:** bộ đếm nằm trong RAM của một process, nên nhiều worker/instance đếm riêng và restart là mất. Vì vậy Part 6 dùng Redis.
+
+Gọi liên tục 20 lần bằng token của `student`:
+```
+1 : 200 ... 10 : 200
+11 : 429 ... 20 : 429
+```
+(10 lần 200 vì request thành công trước đó đã ngoài cửa sổ 60 giây.) Chi tiết một phản hồi 429:
+```
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795704834
+retry-after: 48
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":48}}
+```
+Gọi 20 lần bằng token của `teacher` (admin): tất cả `200`. `student` gọi `/admin/stats` → `403 {"detail":"Admin only"}`. `/me/usage` của `student` sau 11 request: `requests: 11`, `cost_usd: 0.000211`, `budget_used_pct: 0.0`.
 
 ### Exercise 4.4: Cost guard implementation
-_TODO — có thể mô tả cách làm ở Part 6: cộng dồn chi phí vào Redis (`INCRBYFLOAT`) theo ngày và tháng, `check_budget()` trước khi gọi LLM trả 402 khi vượt, `record_cost()` sau khi gọi, key tự hết hạn bằng `EXPIRE`. Xem `06-lab-complete/app/cost_guard.py`._
+**Bản demo** ([production/cost_guard.py](04-api-gateway/production/cost_guard.py)): class `CostGuard` lưu trong RAM, ngân sách $1/ngày cho mỗi user và $10/ngày toàn hệ thống. `check_budget` chạy **trước** khi gọi LLM: vượt ngân sách user → **402** Payment Required, vượt ngân sách toàn cục → **503**, đạt 80% thì ghi cảnh báo. `record_usage` chạy **sau** khi gọi LLM để cộng token (đổi ra USD theo giá/1K token).
+
+**Cách tôi làm ở Part 6** ([06-lab-complete/app/cost_guard.py](06-lab-complete/app/cost_guard.py)), lưu trong Redis để dùng chung giữa các worker và không mất khi restart:
+- `record_cost(input_tokens, output_tokens)` tính chi phí rồi `INCRBYFLOAT` vào hai key `cost:day:YYYY-MM-DD` và `cost:month:YYYY-MM` (gói trong một pipeline), kèm `EXPIRE` (2 ngày và 32 ngày) để tự reset khi sang ngày/tháng mới.
+- `check_budget()` gọi `MGET` đọc hai key trước khi gọi LLM; nếu tổng vượt `DAILY_BUDGET_USD` hoặc `MONTHLY_BUDGET_USD` thì trả **402**.
+- Khi Redis lỗi, trả **503** (fail closed) thay vì cho qua, để không mất kiểm soát chi phí.
+- Kiểm chứng: script `check_production_ready.py` đặt budget `0.000001` USD và nhận 402 ở request đầu tiên.
+
+Hạn chế: bước kiểm tra và bước ghi là hai lệnh tách nhau, nên các request đồng thời có thể vượt ngân sách một chút; production thật thường gộp vào một script Lua hoặc dùng cơ chế "đặt chỗ" (reserve) trước khi gọi LLM. Chi phí chỉ là ước lượng theo số từ nên chưa chính xác như số token thật của nhà cung cấp.
+
+**Rate limit và cost guard bổ sung cho nhau:** rate limit bảo vệ *tốc độ* (chống spam, DoS), cost guard bảo vệ *tiền* (một user gọi chậm nhưng prompt rất dài vẫn có thể đốt ngân sách).
 
 ## Part 5: Scaling & Reliability
 
